@@ -1,6 +1,3 @@
 requests
 httpagentparser
 Flask
-base64
-json
-time

